@@ -339,6 +339,7 @@ def train():
                                            buffer, buffer_ls, args.exploration_factor, args.exploration_wd)
         if i == 4000:
             # Reset the parameters of the model
+            print("Second Phase")
             reset_params(gfn_model)          
             args.mode_bwd = 'mle'
         

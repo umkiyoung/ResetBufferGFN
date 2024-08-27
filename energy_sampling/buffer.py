@@ -35,7 +35,7 @@ class ReplayBuffer():
         try:
             indices = np.random.choice(len(self.buffer), batch_size, p=priorities, replace=False)
         except:
-            indices = np.random.choice(len(self.buffer), batch_size, p=self.softmax(self.rewards), replace=False)
+            indices = np.random.choice(len(self.buffer), batch_size, p = self.softmax(self.rewards), replace=False)
         
         samples = [self.buffer[idx] for idx in indices]
         rewards  = [self.priorities[idx] for idx in indices]
@@ -58,23 +58,23 @@ class ReplayBuffer():
         nbrs = NearestNeighbors(n_neighbors=self.knn_k + 1).fit(buffer_array)
         distances, _ = nbrs.kneighbors(buffer_array)
         
+        # 각 샘플의 밀도를 계산 (거리의 역수를 밀도로 간주)
+        densities = 1.0 / np.sum(distances[:, 1:], axis=1)
         
-        sum_distance = np.sum(distances[:, 1:], axis=1)
-        #normalize to reward range
-        normalized_distance = (sum_distance - np.min(sum_distance)) / (np.max(sum_distance) - np.min(sum_distance))
-        normalized_rewards = (self.rewards - np.min(self.rewards)) / (np.max(self.rewards) - np.min(self.rewards))
+        normalized_densities = self.softmax(densities) 
+        normalized_rewards = self.softmax(self.rewards)
         
-        self.priorities = list(normalized_distance * self.alpha * (self.n_epochs - self.iter / self.n_epochs) + normalized_rewards)
+        self.priorities = list(-np.log(normalized_densities + 1e-5)* self.alpha * (self.n_epochs - self.iter / self.n_epochs)  + np.log(normalized_rewards + 1e-5))
         criteria = -np.array(self.rewards)
-        low_reward_indexes = np.argsort(criteria)[-num_samples:]
+        high_density_low_reward_indexes = np.argsort(criteria)[-num_samples:] 
             
         if return_samples == True:
-            samples = [self.buffer[i] for i in low_reward_indexes]
+            samples = [self.buffer[i] for i in high_density_low_reward_indexes]
             return torch.tensor(np.array(samples)).float().to(self.device)
         else:
-            self.buffer = [v for i, v in enumerate(self.buffer) if i not in low_reward_indexes]
-            self.rewards = [v for i, v in enumerate(self.rewards) if i not in low_reward_indexes]
-            self.priorities = [v for i, v in enumerate(self.priorities) if i not in low_reward_indexes]
+            self.buffer = [v for i, v in enumerate(self.buffer) if i not in high_density_low_reward_indexes]
+            self.rewards = [v for i, v in enumerate(self.rewards) if i not in high_density_low_reward_indexes]
+            self.priorities = [v for i, v in enumerate(self.priorities) if i not in high_density_low_reward_indexes]
 
     def __len__(self):
         return len(self.buffer)
