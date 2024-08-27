@@ -110,7 +110,7 @@ final_plot_data_size = 2000
 if args.pis_architectures:
     args.zero_init = True
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 coeff_matrix = cal_subtb_coef_matrix(args.subtb_lambda, args.T).to(device)
 
 if args.both_ways and args.bwd:
@@ -277,25 +277,28 @@ def bwd_train_step(energy, gfn_model, buffer, buffer_ls, exploration_std=None, i
                                  exploration_std=exploration_std)
     return loss
 
-def shrink_perturb(net, shrink, perturb):
-    # using a randomly-initialized model as a noise source respects how different kinds 
-    # of parameters are often initialized differently
+def reset_params(model):
+    for layer in model.children():
+        if hasattr(layer, 'reset_parameters'):
+            layer.reset_parameters()
+        else:
+            reset_params(layer)
+
+def shrink_perturb(model, energy, shrink, perturb):
     noise = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
-                trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
-                langevin=args.langevin, learned_variance=args.learned_variance,
-                partial_energy=args.partial_energy, log_var_range=args.log_var_range,
-                pb_scale_range=args.pb_scale_range,
-                t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
-                conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
-                pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
-                joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
-    noise.load_state_dict(net.state_dict())
-    for (name, param), (name_noise, param_noise) in zip(net.named_parameters(), noise.named_parameters()):
-        if 'weight' in name:
-            param.data = shrink * param.data + perturb * param_noise.data
-        elif 'bias' in name:
-            param.data = shrink * param.data + perturb * param_noise.data
-    return net
+                    trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
+                    langevin=args.langevin, learned_variance=args.learned_variance,
+                    partial_energy=args.partial_energy, log_var_range=args.log_var_range,
+                    pb_scale_range=args.pb_scale_range,
+                    t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
+                    conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
+                    pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
+                    joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
+   
+    for param, noise_param in zip(model.parameters(), noise.parameters()):
+        param.data = param.data * shrink + noise_param.data * perturb
+    
+    return model
 
 def train():
     name = get_name(args)
@@ -327,13 +330,20 @@ def train():
     print(gfn_model)
     metrics = dict()
 
-    buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 2)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 2)
+    buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 3)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 3)
     
     gfn_model.train()
     for i in trange(args.epochs + 1):
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
                                            buffer, buffer_ls, args.exploration_factor, args.exploration_wd)
+        #if i == 4000:
+        #    # Reset the parameters of the model
+        #    reset_params(gfn_model)          
+        #if i == 10:
+        #    # Shrink the perturbation
+        #    gfn_model = shrink_perturb(gfn_model, energy, 0.995, 0.005)    
+        
         if i % 100 == 0:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
             if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
