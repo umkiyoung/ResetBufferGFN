@@ -56,27 +56,26 @@ class Trainer():
 class ReplayBuffer():
     def __init__(self, 
                  max_size, 
-                 device = "cpu",
+                 device="cpu",
                  input_dim=2, 
                  hidden_dim=128,
                  output_dim=1, 
                  num_models=2,
                  decay=10000,
-                 alpha = 1,
-                 exploration_mode = True,
-                 ):
+                 alpha=1,
+                 exploration_mode=True):
         
         self.max_size = max_size
         self.decay = decay
         self.alpha = alpha        
         self.device = device
         
-        self.buffer = []
-        self.rewards = []
-        self.novelty = []
-        self.novelty_threshold = 0
+        self.buffer = np.empty((max_size, input_dim))
+        self.rewards = np.empty(max_size)
+        self.novelty = np.empty(max_size)
         self.iter = 0
         self.exploration_mode = exploration_mode
+        self.current_size = 0
         
         self.trainer = Trainer(
             Ensemble(input_dim, hidden_dim, output_dim, num_models),
@@ -87,35 +86,45 @@ class ReplayBuffer():
             
     def add(self, transition, rewards):
         self.iter += 1
+        num_new_samples = transition.shape[0]
         
         # Truncate Buffer
-        if len(self.buffer) + transition.shape[0] >= self.max_size:
-            self.low_reward_truncate(transition.shape[0])
-            
-        # Add Transition
+        if self.current_size + num_new_samples > self.max_size:
+            self.low_reward_truncate(num_new_samples)
+        
+        # Predict novelty and train model
         y_pred = self.trainer.model(transition)
         max_novelty = torch.max((y_pred - rewards.unsqueeze(0))**2, dim=0)[0]
         self.trainer.train(transition, rewards.unsqueeze(0))
+        
+        # Convert to numpy for storage
         transition, rewards = transition.cpu().detach().numpy(), rewards.cpu().detach().numpy()
         max_novelty = max_novelty.cpu().detach().numpy()
         
-        for i in range(transition.shape[0]):
-            if max_novelty[i] <= self.novelty_threshold:
-                continue
-            self.buffer.append(transition[i])
-            self.rewards.append(max(rewards[i], -100))
-            self.novelty.append(max_novelty[i])
+        # Add valid samples to buffer
+        for i in range(num_new_samples):          
+            if self.current_size < self.max_size:
+                self.buffer[self.current_size] = transition[i]
+                self.rewards[self.current_size] = max(rewards[i], -100)
+                self.novelty[self.current_size] = max_novelty[i]
+                self.current_size += 1
+        
+        self.update_all_novelty()
                         
     def low_reward_truncate(self, num_samples, return_samples=False):
-        criteria = np.array(self.rewards)
-        indices = np.argsort(criteria)[:num_samples]
-        if return_samples:
-            samples = [self.buffer[idx] for idx in indices]
-            return torch.tensor(np.array(samples)).float().to(self.device)
+        indices = np.argsort(self.rewards)[:num_samples]
         
-        self.buffer = [self.buffer[i] for i in range(len(self.buffer)) if i not in indices]
-        self.rewards = [self.rewards[i] for i in range(len(self.rewards)) if i not in indices]
-        self.novelty = [self.novelty[i] for i in range(len(self.novelty)) if i not in indices]
+        if return_samples:
+            samples = self.buffer[indices]
+            return torch.tensor(samples).float().to(self.device)
+        
+        mask = np.ones(self.current_size, dtype=bool)
+        mask[indices] = False
+        
+        self.buffer = self.buffer[mask]
+        self.rewards = self.rewards[mask]
+        self.novelty = self.novelty[mask]
+        self.current_size -= num_samples
 
     def softmax(self, x):
         e_x = np.exp(x - np.max(x))
@@ -124,35 +133,39 @@ class ReplayBuffer():
     def sample(self, batch_size):
         priorities = self.get_priorities()
         priorities = 0.9999 * priorities + 0.0001 / len(priorities)
-        indices = np.random.choice(len(self.buffer), batch_size, p=priorities, replace=False)
+        indices = np.random.choice(self.current_size, batch_size, p=priorities, replace=False)
         
-        samples = [self.buffer[idx] for idx in indices]
-        rewards  = [self.rewards[idx] for idx in indices]
+        samples = self.buffer[indices]
+        rewards  = self.rewards[indices]
         
         # Update Novelty
-        samples_tensor, rewards_tensor = torch.tensor(np.array(samples)).float().to(self.device), torch.tensor(np.array(rewards)).float().to(self.device)
+        samples_tensor = torch.tensor(samples).float().to(self.device)
+        rewards_tensor = torch.tensor(rewards).float().to(self.device)
         self.trainer.train(samples_tensor, rewards_tensor)
+        self.update_all_novelty()
+        return samples_tensor, rewards_tensor
+    
+    def update_all_novelty(self):
+        samples_tensor = torch.tensor(self.buffer[:self.current_size]).float().to(self.device)
+        rewards_tensor = torch.tensor(self.rewards[:self.current_size]).float().to(self.device)
         y_pred = self.trainer.model(samples_tensor)
         max_novelty = torch.max((y_pred - rewards_tensor.unsqueeze(0))**2, dim=0)[0]
-        for i, idx in enumerate(indices):
-            self.novelty[idx] = max_novelty[i].cpu().detach().numpy()       
-
-        return samples_tensor, rewards_tensor
+        self.novelty[:self.current_size] = max_novelty.cpu().detach().numpy()
 
     def get_priorities(self):
-        if self.exploration_mode == True:
-            normalized_novelty = self.normalize(self.novelty)
-            normalized_rewards = self.normalize(self.rewards)
-            priorities = np.array(normalized_novelty) * self.alpha * max(0,(self.decay - self.iter / self.decay))
-            priorities = priorities + np.array(normalized_rewards)
-            priorities = self.softmax(priorities)    
+        if self.exploration_mode:
+            normalized_novelty = self.normalize(self.novelty[:self.current_size])
+            normalized_rewards = self.normalize(self.rewards[:self.current_size])
+            priorities = normalized_novelty * self.alpha * max(0, (self.decay - self.iter / self.decay))
+            priorities = priorities + normalized_rewards
+            priorities = self.softmax(priorities)
         else:
-            normalized_rewards = self.normalize(self.rewards)
-            priorities = self.softmax(self.rewards)
+            normalized_rewards = self.normalize(self.rewards[:self.current_size])
+            priorities = self.softmax(normalized_rewards)
         return priorities
             
     def normalize(self, x):
         return (x - np.min(x)) / (np.max(x) - np.min(x))
     
     def __len__(self):
-        return len(self.buffer)
+        return self.current_size
