@@ -8,8 +8,8 @@
             "request": "launch",
             "program": "${workspaceFolder}/energy_sampling/train.py",
             "args": [
-                "--t_scale", "1.",
-                "--energy", "many_well",
+                "--t_scale", "5.",
+                "--energy", "25gmm",
                 "--pis_architectures",
                 "--zero_init",
                 "--clipping",
