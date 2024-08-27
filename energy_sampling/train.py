@@ -340,8 +340,7 @@ def train():
         if i == 4000:
             # Reset the parameters of the model
             reset_params(gfn_model)          
-
-        args.mode_bwd = 'mle'
+            args.mode_bwd = 'mle'
         
         if i % 100 == 0:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
