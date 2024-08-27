@@ -5,7 +5,8 @@ import os
 
 from utils import set_seed, cal_subtb_coef_matrix, fig_to_image, get_gfn_optimizer, get_gfn_forward_loss, \
     get_gfn_backward_loss, get_exploration_std, get_name
-from buffer import ReplayBuffer
+#from buffer import ReplayBuffer
+from ensemble_buffer import ReplayBuffer
 from langevin import langevin_dynamics
 from models import GFN
 from gflownet_losses import *
@@ -36,6 +37,7 @@ parser.add_argument('--energy', type=str, default='9gmm',
 parser.add_argument('--mode_fwd', type=str, default="tb", choices=('tb', 'tb-avg', 'db', 'subtb', "pis"))
 parser.add_argument('--mode_bwd', type=str, default="tb", choices=('tb', 'tb-avg', 'mle'))
 parser.add_argument('--both_ways', action='store_true', default=False)
+parser.add_argument('--phase2', type=int, default=2000)
 
 # For local search
 ################################################################
@@ -140,7 +142,7 @@ def plot_step(energy, gfn_model=None, name="", buffer=None, plot_size=None, is_b
         samples, _ = buffer.sample(plot_size)
         prefix = "buffer"
     elif is_buffer == "filter":
-        samples = buffer.remove_high_density_sample(plot_size, return_samples=True)
+        samples = buffer.low_reward_truncate(plot_size, return_samples=True)
         prefix = "filter"        
     else:
         # GFN 모델에서 샘플링
@@ -277,28 +279,6 @@ def bwd_train_step(energy, gfn_model, buffer, buffer_ls, exploration_std=None, i
                                  exploration_std=exploration_std)
     return loss
 
-def reset_params(model):
-    for layer in model.children():
-        if hasattr(layer, 'reset_parameters'):
-            layer.reset_parameters()
-        else:
-            reset_params(layer)
-
-def shrink_perturb(model, energy, shrink, perturb):
-    noise = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
-                    trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
-                    langevin=args.langevin, learned_variance=args.learned_variance,
-                    partial_energy=args.partial_energy, log_var_range=args.log_var_range,
-                    pb_scale_range=args.pb_scale_range,
-                    t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
-                    conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
-                    pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
-                    joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
-   
-    for param, noise_param in zip(model.parameters(), noise.parameters()):
-        param.data = param.data * shrink + noise_param.data * perturb
-    
-    return model
 
 def train():
     name = get_name(args)
@@ -329,22 +309,40 @@ def train():
 
     print(gfn_model)
     metrics = dict()
-
-    buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 1)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 1)
+    #For KNN
+    #buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, decay = args.phase2, alpha = 1)
+    #buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, decay = args.phase2, alpha = 1)
+    
+    #For Ensemble
+    buffer = ReplayBuffer(args.buffer_size, device, input_dim=energy.data_ndim, hidden_dim=args.hidden_dim,
+                          output_dim=1, num_models=2, decay=args.phase2, alpha=1)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, input_dim=energy.data_ndim, hidden_dim=args.hidden_dim,
+                                output_dim=1, num_models=2, decay=args.phase2, alpha=1)
     
     gfn_model.train()
     for i in trange(args.epochs + 1):
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
                                            buffer, buffer_ls, args.exploration_factor, args.exploration_wd)
-        if i == 2000:
-            # Reset the parameters of the model
-            print("Second Phase")
-            reset_params(gfn_model)          
-            args.mode_bwd = 'mle'
+        
+        if i == args.phase2:
+            # Phase 2: Exploration mode off
+            # Reinitialize gfn_model, gfn_optimizer
+            gfn_model = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
+                    trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
+                    langevin=args.langevin, learned_variance=args.learned_variance,
+                    partial_energy=args.partial_energy, log_var_range=args.log_var_range,
+                    pb_scale_range=args.pb_scale_range,
+                    t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
+                    conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
+                    pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
+                    joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
+            
+            gfn_optimizer = get_gfn_optimizer(gfn_model, args.lr_policy, args.lr_flow, args.lr_back, args.learn_pb,
+                                        args.conditional_flow_model, args.use_weight_decay, args.weight_decay)
+            
             buffer.exploration_mode = False
             buffer_ls.exploration_mode = False
-
+                
         
         if i % 100 == 0:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
@@ -357,11 +355,12 @@ def train():
                 plot_buffer_size = len(buffer)
             else:
                 plot_buffer_size = plot_data_size
-            images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
-            metrics.update(images_buffer)
-            images_filter = plot_step(energy, gfn_model, name, buffer, plot_buffer_size, is_buffer="filter")
-            metrics.update(images_filter)
-            
+            if args.both_ways:
+                images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
+                metrics.update(images_buffer)
+                images_filter = plot_step(energy, gfn_model, name, buffer, plot_buffer_size, is_buffer="filter")
+                metrics.update(images_filter)
+
             plt.close('all')
             wandb.log(metrics, step=i)
             if i % 1000 == 0:

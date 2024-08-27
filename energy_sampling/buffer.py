@@ -3,7 +3,7 @@ import torch
 from collections import deque
 from sklearn.neighbors import NearestNeighbors
 class ReplayBuffer():
-    def __init__(self, max_size, device, knn_k=5, n_epochs=10000, alpha = 1, exploration_mode = True):
+    def __init__(self, max_size, device, knn_k=5, decay=10000, alpha = 1, exploration_mode = True):
         self.max_size = max_size
         self.buffer = []
         self.rewards = []
@@ -11,7 +11,7 @@ class ReplayBuffer():
         self.device = device
         self.knn_k = knn_k  # KNN에서 사용할 이웃의 수
         self.reward_cutline = None
-        self.n_epochs = n_epochs
+        self.decay = decay
         self.alpha = alpha
         self.iter = 0
         self.exploration_mode = exploration_mode
@@ -20,11 +20,9 @@ class ReplayBuffer():
         self.iter += 1
         transition, rewards = transition.cpu().numpy(), rewards.cpu().numpy()
         if len(self.buffer) + transition.shape[0] >= self.max_size:
-            self.remove_high_density_sample(len(self.buffer)//5)
+            self.low_reward_truncate(len(self.buffer)//5)
         
         for i in range(transition.shape[0]):
-            if self.reward_cutline is not None and rewards[i] < self.reward_cutline:
-                continue
             self.buffer.append(transition[i])
             self.rewards.append(max(rewards[i], -100))
             self.priorities.append(-100)
@@ -34,7 +32,7 @@ class ReplayBuffer():
             priorities = self.softmax(self.priorities)
         else:
             priorities = self.softmax(self.rewards)
-        # Replace=False로 중복되지 않게 샘플링
+
         try:
             indices = np.random.choice(len(self.buffer), batch_size, p=priorities, replace=False)
         except:
@@ -52,7 +50,7 @@ class ReplayBuffer():
         e_x = np.exp(x - np.max(x))
         return e_x / e_x.sum()
 
-    def remove_high_density_sample(self, num_samples, return_samples=False):
+    def low_reward_truncate(self, num_samples, return_samples=False):
         # Buffer에 있는 샘플들에 대해 KNN을 사용하여 밀도를 계산
         buffer_array = np.array(self.buffer)
         if len(buffer_array) < self.knn_k + 1:
@@ -67,7 +65,8 @@ class ReplayBuffer():
         normalized_densities = self.softmax(densities) 
         normalized_rewards = self.softmax(self.rewards)
         
-        self.priorities = list(-np.log(normalized_densities + 1e-5) * self.alpha * (self.n_epochs - self.iter / self.n_epochs)  + np.log(normalized_rewards + 1e-5))
+        # 이 파트는 좀 더 정리 필요할듯.
+        self.priorities = list(-np.log(normalized_densities + 1e-5) * self.alpha * (self.decay - self.iter / self.decay)  + np.log(normalized_rewards + 1e-5))
         criteria = -np.array(self.rewards)
         high_density_low_reward_indexes = np.argsort(criteria)[-num_samples:] 
             
