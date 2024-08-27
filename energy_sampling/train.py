@@ -337,12 +337,11 @@ def train():
     for i in trange(args.epochs + 1):
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
                                            buffer, buffer_ls, args.exploration_factor, args.exploration_wd)
-        #if i == 4000:
-        #    # Reset the parameters of the model
-        #    reset_params(gfn_model)          
-        #if i == 10:
-        #    # Shrink the perturbation
-        #    gfn_model = shrink_perturb(gfn_model, energy, 0.995, 0.005)    
+        if i == 4000:
+            # Reset the parameters of the model
+            reset_params(gfn_model)          
+
+        args.mode_bwd = 'mle'
         
         if i % 100 == 0:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
