@@ -3,7 +3,7 @@ import torch
 from collections import deque
 from sklearn.neighbors import NearestNeighbors
 class ReplayBuffer():
-    def __init__(self, max_size, device, knn_k=5, n_epochs=10000, alpha = 1):
+    def __init__(self, max_size, device, knn_k=5, n_epochs=10000, alpha = 1, exploration_mode = True):
         self.max_size = max_size
         self.buffer = []
         self.rewards = []
@@ -14,7 +14,8 @@ class ReplayBuffer():
         self.n_epochs = n_epochs
         self.alpha = alpha
         self.iter = 0
-
+        self.exploration_mode = exploration_mode
+        
     def add(self, transition, rewards):
         self.iter += 1
         transition, rewards = transition.cpu().numpy(), rewards.cpu().numpy()
@@ -29,8 +30,10 @@ class ReplayBuffer():
             self.priorities.append(-100)
 
     def sample(self, batch_size):
-        priorities = self.softmax(self.priorities)
-        
+        if self.exploration_mode == True:
+            priorities = self.softmax(self.priorities)
+        else:
+            priorities = self.softmax(self.rewards)
         # Replace=False로 중복되지 않게 샘플링
         try:
             indices = np.random.choice(len(self.buffer), batch_size, p=priorities, replace=False)
@@ -64,7 +67,7 @@ class ReplayBuffer():
         normalized_densities = self.softmax(densities) 
         normalized_rewards = self.softmax(self.rewards)
         
-        self.priorities = list(-np.log(normalized_densities + 1e-5)* self.alpha * (self.n_epochs - self.iter / self.n_epochs)  + np.log(normalized_rewards + 1e-5))
+        self.priorities = list(-np.log(normalized_densities + 1e-5) * self.alpha * (self.n_epochs - self.iter / self.n_epochs)  + np.log(normalized_rewards + 1e-5))
         criteria = -np.array(self.rewards)
         high_density_low_reward_indexes = np.argsort(criteria)[-num_samples:] 
             

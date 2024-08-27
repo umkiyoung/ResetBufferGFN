@@ -330,18 +330,21 @@ def train():
     print(gfn_model)
     metrics = dict()
 
-    buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 3)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 3)
+    buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 1)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 1)
     
     gfn_model.train()
     for i in trange(args.epochs + 1):
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
                                            buffer, buffer_ls, args.exploration_factor, args.exploration_wd)
-        if i == 4000:
+        if i == 2000:
             # Reset the parameters of the model
             print("Second Phase")
             reset_params(gfn_model)          
             args.mode_bwd = 'mle'
+            buffer.exploration_mode = False
+            buffer_ls.exploration_mode = False
+
         
         if i % 100 == 0:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
