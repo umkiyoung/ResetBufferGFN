@@ -327,8 +327,8 @@ def train():
     print(gfn_model)
     metrics = dict()
 
-    buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 5)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 5)
+    buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 2)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, n_epochs=args.epochs, alpha = 2)
     
     gfn_model.train()
     for i in trange(args.epochs + 1):
