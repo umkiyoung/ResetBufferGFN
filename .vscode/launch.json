@@ -1,0 +1,32 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python: Train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/energy_sampling/train.py",
+            "args": [
+                "--t_scale", "1.",
+                "--energy", "many_well",
+                "--pis_architectures",
+                "--zero_init",
+                "--clipping",
+                "--mode_fwd", "tb",
+                "--both_way",
+                "--lr_policy", "1e-3",
+                "--lr_flow", "1e-1",
+                "--exploratory",
+                "--exploration_wd",
+                "--exploration_factor", "0.1",
+                "--device", "cuda:0",
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/energy_sampling"
+            },            
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

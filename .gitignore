@@ -1,5 +1,6 @@
 results_pis_architectures/
 energy_sampling/wandb
 energy_sampling/__pycache__
+wandb/
 *.pdf
 *.pt
