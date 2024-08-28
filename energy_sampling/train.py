@@ -6,7 +6,7 @@ import os
 from utils import set_seed, cal_subtb_coef_matrix, fig_to_image, get_gfn_optimizer, get_gfn_forward_loss, \
     get_gfn_backward_loss, get_exploration_std, get_name
 #from buffer import ReplayBuffer
-from ensemble_buffer import ReplayBuffer
+from RND_buffer import ReplayBuffer
 from langevin import langevin_dynamics
 from models import GFN
 from gflownet_losses import *
@@ -37,7 +37,7 @@ parser.add_argument('--energy', type=str, default='9gmm',
 parser.add_argument('--mode_fwd', type=str, default="tb", choices=('tb', 'tb-avg', 'db', 'subtb', "pis"))
 parser.add_argument('--mode_bwd', type=str, default="tb", choices=('tb', 'tb-avg', 'mle'))
 parser.add_argument('--both_ways', action='store_true', default=False)
-parser.add_argument('--phase2', type=int, default=2000)
+parser.add_argument('--phase2', type=int, default=4000)
 
 # For local search
 ################################################################
@@ -142,7 +142,7 @@ def plot_step(energy, gfn_model=None, name="", buffer=None, plot_size=None, is_b
         samples, _ = buffer.sample(plot_size)
         prefix = "buffer"
     elif is_buffer == "filter":
-        samples = buffer.low_reward_truncate(plot_size, return_samples=True)
+        samples = buffer.truncate(plot_size, return_samples=True)
         prefix = "filter"        
     else:
         # GFN 모델에서 샘플링
@@ -313,11 +313,9 @@ def train():
     #buffer = ReplayBuffer(args.buffer_size, device, knn_k=30, decay = args.phase2, alpha = 1)
     #buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, decay = args.phase2, alpha = 1)
     
-    #For Ensemble
-    buffer = ReplayBuffer(args.buffer_size, device, input_dim=energy.data_ndim, hidden_dim=args.hidden_dim,
-                          output_dim=1, num_models=2, decay=args.phase2, alpha=1)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, input_dim=energy.data_ndim, hidden_dim=args.hidden_dim,
-                                output_dim=1, num_models=2, decay=args.phase2, alpha=1)
+    #For RND
+    buffer = ReplayBuffer(args.buffer_size, device, rnd_input = 2, rnd_output = 1, learning_rate = 1e-6)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, rnd_input = 2, rnd_output = 1, learning_rate = 1e-6)
     
     gfn_model.train()
     for i in trange(args.epochs + 1):

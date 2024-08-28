@@ -21,6 +21,8 @@
                 "--exploration_wd",
                 "--exploration_factor", "0.1",
                 "--device", "cuda:0",
+                "--batch_size", "2000",
+                "--buffer_size", "600000",
             ],
             "console": "integratedTerminal",
             "env": {
