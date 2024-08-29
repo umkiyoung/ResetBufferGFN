@@ -6,12 +6,14 @@ import os
 from utils import set_seed, cal_subtb_coef_matrix, fig_to_image, get_gfn_optimizer, get_gfn_forward_loss, \
     get_gfn_backward_loss, get_exploration_std, get_name
 #from buffer import ReplayBuffer
-from RND_buffer import ReplayBuffer
+#from RND_buffer import ReplayBuffer
+from max_reward_buffer import ReplayBuffer
 from langevin import langevin_dynamics
 from models import GFN
 from gflownet_losses import *
 from energies import *
 from evaluations import *
+import time
 
 import matplotlib.pyplot as plt
 from tqdm import trange
@@ -37,7 +39,7 @@ parser.add_argument('--energy', type=str, default='9gmm',
 parser.add_argument('--mode_fwd', type=str, default="tb", choices=('tb', 'tb-avg', 'db', 'subtb', "pis"))
 parser.add_argument('--mode_bwd', type=str, default="tb", choices=('tb', 'tb-avg', 'mle'))
 parser.add_argument('--both_ways', action='store_true', default=False)
-parser.add_argument('--phase2', type=int, default=4000)
+
 
 # For local search
 ################################################################
@@ -71,6 +73,12 @@ parser.add_argument('--rank_weight', type=float, default=1e-2)
 
 # three kinds of replay training: random, reward prioritized, rank-based
 parser.add_argument('--prioritized', type=str, default="rank", choices=('none', 'reward', 'rank'))
+
+parser.add_argument('--output_dim', type=int, default=1)
+parser.add_argument('--coreset_size', type=int, default=30000)
+parser.add_argument('--load_buffer_path', type=str, default=None)
+parser.add_argument('--pr_or_co', type=str, default="prioritize", choices=('prioritize', 'coreset'))
+parser.add_argument('--phase2', type=int, default=4000)
 ################################################################
 
 parser.add_argument('--bwd', action='store_true', default=False)
@@ -98,6 +106,8 @@ parser.add_argument('--weight_decay', type=float, default=1e-7)
 parser.add_argument('--use_weight_decay', action='store_true', default=False)
 parser.add_argument('--eval', action='store_true', default=False)
 parser.add_argument('--device', type=str, default='cuda:0')
+
+parser.add_argument('--wandb', action='store_true', default=False)
 args = parser.parse_args()
 
 set_seed(args.seed)
@@ -227,7 +237,7 @@ def eval_step(eval_data, energy, gfn_model, final_eval=False):
     return metrics
 
 
-def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer_ls, exploration_factor, exploration_wd):
+def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer_ls, exploration_factor, exploration_wd, phase2 =False):
     gfn_model.zero_grad()
 
     exploration_std = get_exploration_std(it, exploratory, exploration_factor, exploration_wd)
@@ -236,7 +246,11 @@ def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer
         if it % 2 == 0:
             if args.sampling == 'buffer':
                 loss, states, _, _, log_r  = fwd_train_step(energy, gfn_model, exploration_std, return_exp=True)
-                buffer.add(states[:, -1],log_r)
+                if phase2 == False:
+                    buffer.add(states[:, -1],log_r)
+                    # reset loss to 0
+                    loss = 0.0
+                    return
             else:
                 loss = fwd_train_step(energy, gfn_model, exploration_std)
         else:
@@ -247,6 +261,8 @@ def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer
     else:
         loss = fwd_train_step(energy, gfn_model, exploration_std)
 
+    
+    
     loss.backward()
     gfn_optimizer.step()
     return loss.item()
@@ -275,7 +291,7 @@ def bwd_train_step(energy, gfn_model, buffer, buffer_ls, exploration_std=None, i
         else:
             samples, rewards = buffer.sample(args.batch_size)
 
-    loss = get_gfn_backward_loss(args.mode_bwd, samples, gfn_model, energy.log_reward,
+    loss = get_gfn_backward_loss(args.mode_bwd, samples, gfn_model, rewards,
                                  exploration_std=exploration_std)
     return loss
 
@@ -291,7 +307,8 @@ def train():
 
     config = args.__dict__
     config["Experiment"] = "{args.energy}"
-    wandb.init(project="GFN Energy", config=config, name=name)
+    if args.wandb:
+        wandb.init(project="GFN Energy", config=config, name=name)
 
     gfn_model = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
                     trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
@@ -314,50 +331,77 @@ def train():
     #buffer_ls = ReplayBuffer(args.buffer_size, device, knn_k=30, decay = args.phase2, alpha = 1)
     
     #For RND
-    buffer = ReplayBuffer(args.buffer_size, device, rnd_input = 2, rnd_output = 1, learning_rate = 1e-6)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, rnd_input = 2, rnd_output = 1, learning_rate = 1e-6)
+    #buffer = ReplayBuffer(args.buffer_size, device, rnd_input = energy.data_ndim, rnd_output = args.output_dim, learning_rate = 1e-6)
+    #buffer_ls = ReplayBuffer(args.buffer_size, device, rnd_input = energy.data_ndim, rnd_output = args.output_dim, learning_rate = 1e-6)
+    
+    # For Max Reward
+    buffer = ReplayBuffer(args.buffer_size, device, coreset_size = args.coreset_size, exploration_mode=True)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, coreset_size = args.coreset_size, exploration_mode=True)
+    
+    if args.load_buffer_path is not None:
+        buffer.load_buffer(args.load_buffer_path)
+        if args.local_search:
+            buffer_ls.load_buffer(args.load_buffer_path)
+        if args.pr_or_co == "coreset":
+            buffer.get_core_set()
+            buffer_ls.get_core_set()
+        else:
+            buffer.set_prioritization()
+            buffer_ls.set_prioritization()
+        print("Start From Phase 2")
+    
     
     gfn_model.train()
     for i in trange(args.epochs + 1):
+        phase2_true = i >= args.phase2 or args.load_buffer_path is not None
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
-                                           buffer, buffer_ls, args.exploration_factor, args.exploration_wd)
-        
-        if i == args.phase2:
-            # Phase 2: Exploration mode off
-            # Reinitialize gfn_model, gfn_optimizer
-            gfn_model = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
-                    trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
-                    langevin=args.langevin, learned_variance=args.learned_variance,
-                    partial_energy=args.partial_energy, log_var_range=args.log_var_range,
-                    pb_scale_range=args.pb_scale_range,
-                    t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
-                    conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
-                    pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
-                    joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
-            
-            gfn_optimizer = get_gfn_optimizer(gfn_model, args.lr_policy, args.lr_flow, args.lr_back, args.learn_pb,
-                                        args.conditional_flow_model, args.use_weight_decay, args.weight_decay)
-            
-            buffer.exploration_mode = False
-            buffer_ls.exploration_mode = False
+                                           buffer, buffer_ls, args.exploration_factor, args.exploration_wd, phase2_true)
+        if args.load_buffer_path is None:
+            if i == args.phase2 or i == 0:
+                # Save Buffer
+                buffer.save_buffer(f"energy_sampling/buffer_np/buffer_{args.energy}_{args.phase2}_{time.time()}")
+                if args.local_search:
+                    buffer_ls.save_buffer(f"energy_sampling/buffer_np/buffer_ls_{args.energy}_{args.phase2}_{time.time()}")
                 
+                # Phase 2: Exploration mode off
+                # Reinitialize gfn_model, gfn_optimizer
+                #gfn_model = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
+                #        trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
+                #        langevin=args.langevin, learned_variance=args.learned_variance,
+                #        partial_energy=args.partial_energy, log_var_range=args.log_var_range,
+                #        pb_scale_range=args.pb_scale_range,
+                #        t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
+                #        conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
+                #        pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
+                #        joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
+                #
+                #gfn_optimizer = get_gfn_optimizer(gfn_model, args.lr_policy, args.lr_flow, args.lr_back, args.learn_pb,
+                #                            args.conditional_flow_model, args.use_weight_decay, args.weight_decay)
+                
+                if args.pr_or_co == "coreset":
+                    buffer.get_core_set()
+                    buffer_ls.get_core_set()
+                else:
+                    buffer.set_prioritization()
+                    buffer_ls.set_prioritization()
+                print("Phase 2 Start")
         
-        if i % 100 == 0:
+        if i % 100 == 0 and args.wandb:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
             if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
                 del metrics['eval/log_Z_learned']
-            images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
-                               is_buffer="none")
-            metrics.update(images)
-            if len(buffer) < plot_data_size:
-                plot_buffer_size = len(buffer)
-            else:
-                plot_buffer_size = plot_data_size
-            if args.both_ways:
-                images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
-                metrics.update(images_buffer)
-                images_filter = plot_step(energy, gfn_model, name, buffer, plot_buffer_size, is_buffer="filter")
-                metrics.update(images_filter)
+            try:
+                images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
+                                is_buffer="none")
+                metrics.update(images)
+                if args.both_ways:
+                    images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
+                    metrics.update(images_buffer)
+                    if phase2_true == False:
+                        images_filter = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="filter")
+                        metrics.update(images_filter)
+            except:
+                pass
 
             plt.close('all')
             wandb.log(metrics, step=i)
@@ -365,10 +409,11 @@ def train():
                 torch.save(gfn_model.state_dict(), f'{name}model.pt')
 
     eval_results = final_eval(energy, gfn_model).to(device)
-    metrics.update(eval_results)
-    if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
-        del metrics['eval/log_Z_learned']
-    torch.save(gfn_model.state_dict(), f'{name}model_final.pt')
+    if args.wandb:
+        metrics.update(eval_results)
+        if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
+            del metrics['eval/log_Z_learned']
+        torch.save(gfn_model.state_dict(), f'{name}model_final.pt')
 
 
 def final_eval(energy, gfn_model):

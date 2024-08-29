@@ -8,8 +8,8 @@
             "request": "launch",
             "program": "${workspaceFolder}/energy_sampling/train.py",
             "args": [
-                "--t_scale", "5.",
-                "--energy", "25gmm",
+                "--t_scale", "1.",
+                "--energy", "many_well",
                 "--pis_architectures",
                 "--zero_init",
                 "--clipping",
@@ -23,6 +23,11 @@
                 "--device", "cuda:0",
                 "--batch_size", "2000",
                 "--buffer_size", "600000",
+                "--phase2", "1000",
+                "--coreset_size", "2000",
+                "--load_buffer_path", "energy_sampling/buffer_np/buffer_many_well_1000_1724963379.3716211.npy",
+                "--wandb",
+                "--pr_or_co", "coreset",
             ],
             "console": "integratedTerminal",
             "env": {

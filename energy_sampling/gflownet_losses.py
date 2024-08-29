@@ -17,8 +17,9 @@ def fwd_tb(initial_state, gfn, log_reward_fn, exploration_std=None, return_exp =
 
 def bwd_tb(initial_state, gfn, log_reward_fn, exploration_std=None):
     states, log_pfs, log_pbs, log_fs = gfn.get_trajectory_bwd(initial_state, exploration_std, log_reward_fn)
-    with torch.no_grad():
-        log_r = log_reward_fn(states[:, -1]).detach()
+    #with torch.no_grad():
+    #    log_r = log_reward_fn(states[:, -1]).detach()
+    log_r = log_reward_fn
 
     loss = 0.5 * ((log_pfs.sum(-1) + log_fs[:, 0] - log_pbs.sum(-1) - log_r) ** 2)
     return loss.mean()
