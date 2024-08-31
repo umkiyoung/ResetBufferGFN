@@ -39,6 +39,7 @@ parser.add_argument('--energy', type=str, default='9gmm',
 parser.add_argument('--mode_fwd', type=str, default="tb", choices=('tb', 'tb-avg', 'db', 'subtb', "pis"))
 parser.add_argument('--mode_bwd', type=str, default="tb", choices=('tb', 'tb-avg', 'mle'))
 parser.add_argument('--both_ways', action='store_true', default=False)
+parser.add_argument('--only_bwd', action='store_true', default=False)
 
 
 # For local search
@@ -243,9 +244,12 @@ def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer
     exploration_std = get_exploration_std(it, exploratory, exploration_factor, exploration_wd)
 
     if args.both_ways:
-        if it % 2 == 0:
+        if it % 20 == 0:
             if args.sampling == 'buffer':
-                loss, states, _, _, log_r  = fwd_train_step(energy, gfn_model, exploration_std, return_exp=True)
+                if args.only_bwd:
+                    loss = bwd_train_step(energy, gfn_model, buffer, buffer_ls, exploration_std, it=it)
+                else:
+                    loss, states, _, _, log_r  = fwd_train_step(energy, gfn_model, exploration_std, return_exp=True)
                 if phase2 == False:
                     buffer.add(states[:, -1],log_r)
                     # reset loss to 0
@@ -344,10 +348,12 @@ def train():
             buffer_ls.load_buffer(args.load_buffer_path)
         if args.pr_or_co == "coreset":
             buffer.get_core_set()
-            buffer_ls.get_core_set()
+            if args.local_search:
+                buffer_ls.get_core_set()
         else:
             buffer.set_prioritization()
-            buffer_ls.set_prioritization()
+            if args.local_search:
+                buffer_ls.set_prioritization()
         print("Start From Phase 2")
     
     
@@ -356,12 +362,18 @@ def train():
         phase2_true = i >= args.phase2 or args.load_buffer_path is not None
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
                                            buffer, buffer_ls, args.exploration_factor, args.exploration_wd, phase2_true)
+        
         if args.load_buffer_path is None:
-            if i == args.phase2 or i == 0:
+            if i % 1000 == 0 and i != 0:
+                buffer.save_buffer(f"buffer_np/buffer_{args.energy}_{i}_{time.time()}")
+                print("Buffer Saved at iteration", i)
+        
+        if args.load_buffer_path is None:
+            if i == args.phase2:
                 # Save Buffer
-                buffer.save_buffer(f"energy_sampling/buffer_np/buffer_{args.energy}_{args.phase2}_{time.time()}")
+                buffer.save_buffer(f"buffer_np/buffer_{args.energy}_{i}_{time.time()}")
                 if args.local_search:
-                    buffer_ls.save_buffer(f"energy_sampling/buffer_np/buffer_ls_{args.energy}_{args.phase2}_{time.time()}")
+                    buffer_ls.save_buffer(f"buffer_np/buffer_ls_{args.energy}_{i}_{time.time()}")
                 
                 # Phase 2: Exploration mode off
                 # Reinitialize gfn_model, gfn_optimizer
@@ -390,18 +402,16 @@ def train():
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
             if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
                 del metrics['eval/log_Z_learned']
-            try:
-                images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
-                                is_buffer="none")
-                metrics.update(images)
-                if args.both_ways:
-                    images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
-                    metrics.update(images_buffer)
-                    if phase2_true == False:
-                        images_filter = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="filter")
-                        metrics.update(images_filter)
-            except:
-                pass
+            images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
+                            is_buffer="none")
+            metrics.update(images)
+            if args.both_ways or args.bwd:
+                images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
+                metrics.update(images_buffer)
+                if phase2_true == False:
+                    images_filter = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="filter")
+                    metrics.update(images_filter)
+
 
             plt.close('all')
             wandb.log(metrics, step=i)
