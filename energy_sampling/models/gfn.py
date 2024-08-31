@@ -192,6 +192,7 @@ class GFN(nn.Module):
         return states, logpf, logpb, logf
 
     def get_trajectory_bwd(self, s, exploration_std, log_r):
+        s = s.to(self.device)
         bsz = s.shape[0]
 
         logpf = torch.zeros((bsz, self.trajectory_length), device=self.device)

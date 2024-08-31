@@ -418,16 +418,16 @@ def train():
             if i % 1000 == 0:
                 torch.save(gfn_model.state_dict(), f'{name}model.pt')
 
-    eval_results = final_eval(energy, gfn_model).to(device)
+    eval_results = final_eval(energy, gfn_model)
     if args.wandb:
         metrics.update(eval_results)
         if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
             del metrics['eval/log_Z_learned']
-        torch.save(gfn_model.state_dict(), f'{name}model_final.pt')
+    torch.save(gfn_model.state_dict(), f'{name}model_final.pt')
 
 
 def final_eval(energy, gfn_model):
-    final_eval_data = energy.sample(final_eval_data_size)
+    final_eval_data = energy.sample(final_eval_data_size).to(device)
     results = eval_step(final_eval_data, energy, gfn_model, final_eval=True)
     return results
 

@@ -4,3 +4,4 @@ energy_sampling/__pycache__
 wandb/
 *.pdf
 *.pt
+*.npy
