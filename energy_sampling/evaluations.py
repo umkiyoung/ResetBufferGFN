@@ -4,7 +4,7 @@ from sample_metrics import compute_distribution_distances
 
 
 @torch.no_grad()
-def log_partition_function(initial_state, gfn, log_reward_fn):
+def log_partition_function(initial_state, gfn, log_reward_fn, target_energy=None, gt_xs=None):
     states, log_pfs, log_pbs, log_fs = gfn.get_trajectory_fwd(initial_state, None, log_reward_fn)
     log_r = log_reward_fn(states[:, -1])
     log_weight = log_r + log_pbs.sum(-1) - log_pfs.sum(-1)
@@ -12,8 +12,14 @@ def log_partition_function(initial_state, gfn, log_reward_fn):
     log_Z = logmeanexp(log_weight)
     log_Z_lb = log_weight.mean()
     log_Z_learned = log_fs[:, 0].mean()
-
-    return states[:, -1], log_Z, log_Z_lb, log_Z_learned
+    
+    if gt_xs is not None:
+        _, gt_log_pfs, gt_log_pbs, _ = gfn.get_trajectory_bwd(gt_xs, None, target_energy.log_reward)
+        with torch.no_grad():
+            gt_log_rewards = target_energy.log_reward(gt_xs)
+            eubo = (gt_log_rewards + gt_log_pbs.sum(-1) - gt_log_pfs.sum(-1)).mean()
+            
+    return states[:, -1], log_Z, log_Z_lb, log_Z_learned, eubo
 
 
 @torch.no_grad()

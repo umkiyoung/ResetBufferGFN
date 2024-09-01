@@ -22,7 +22,7 @@ class ReplayBuffer():
         # Initialize the buffer
         self.buffer = []
         self.true_rewards = []
-        self.max_true_reward = -np.inf
+        self.max_true_reward = -100
         
     #----------------- For Adding -----------------#
     def add(self, transition, rewards):
@@ -31,6 +31,8 @@ class ReplayBuffer():
         indices = torch.where(rewards > self.min_cut_value)[0]
         transition, rewards = transition[indices], rewards[indices]
         num_input_transitions = len(rewards)
+        if len(rewards) == 0:
+            return
         if self.real_size + num_input_transitions > self.buffer_size:
             self.truncate(num_input_transitions)
 
@@ -68,8 +70,6 @@ class ReplayBuffer():
         if return_samples == False:
             self.min_cut_value = max(self.min_cut_value, max(np.array(self.true_rewards)[dropping_indices]))
         print(self.min_cut_value)
-        #dropping_indices = np.random.choice(self.real_size, num_samples, replace=False)
-        #dropping_indices = np.arange(num_samples)
         if return_samples:
             return torch.tensor(np.array(self.buffer)[dropping_indices]).float().to(self.device)
         # Drop the lowest intrinsic reward samples
@@ -90,7 +90,7 @@ class ReplayBuffer():
         self.buffer = list(np.array(self.buffer)[low_density_indices])
         self.true_rewards = list(np.array(self.true_rewards)[low_density_indices])
 
-        self.real_size = self.coreset_size
+        self.real_size = len(self.buffer)
     
     #----------------- For Prioritization -----------------#
     def set_prioritization(self):

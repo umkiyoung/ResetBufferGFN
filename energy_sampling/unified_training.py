@@ -39,11 +39,15 @@ parser.add_argument('--energy', type=str, default='9gmm',
 parser.add_argument('--mode_fwd', type=str, default="tb", choices=('tb', 'tb-avg', 'db', 'subtb', "pis"))
 parser.add_argument('--mode_bwd', type=str, default="tb", choices=('tb', 'tb-avg', 'mle'))
 parser.add_argument('--both_ways', action='store_true', default=False)
+
+
+# For Phase model
 parser.add_argument('--only_fwd', action='store_true', default=False)
 parser.add_argument('--only_bwd', action='store_true', default=False)
 parser.add_argument('--phase1', type=int, default=15000)
 parser.add_argument('--phase2', type=int, default=25000)
 parser.add_argument('--phase3', type=int, default=25000)
+parser.add_argument('--phase1_spreading', action='store_true', default=False)
 
 # For local search
 ################################################################
@@ -193,13 +197,13 @@ def eval_step(eval_data, energy, gfn_model, final_eval=False):
     if final_eval:
         init_state = torch.zeros(final_eval_data_size, energy.data_ndim).to(device)
         samples, metrics['final_eval/log_Z'], metrics['final_eval/log_Z_lb'], metrics[
-            'final_eval/log_Z_learned'] = log_partition_function(
-            init_state, gfn_model, energy.log_reward)
+            'final_eval/log_Z_learned'], metrics['eval/eubo'] = log_partition_function(
+            init_state, gfn_model, energy.log_reward, target_energy=energy, gt_xs=eval_data)
     else:
         init_state = torch.zeros(eval_data_size, energy.data_ndim).to(device)
         samples, metrics['eval/log_Z'], metrics['eval/log_Z_lb'], metrics[
-            'eval/log_Z_learned'] = log_partition_function(
-            init_state, gfn_model, energy.log_reward)
+            'eval/log_Z_learned'], metrics['eval/eubo'] = log_partition_function(
+            init_state, gfn_model, energy.log_reward, target_energy=energy, gt_xs=eval_data)
     if eval_data is None:
         log_elbo = None
         sample_based_metrics = None
@@ -217,7 +221,7 @@ def eval_step(eval_data, energy, gfn_model, final_eval=False):
     return metrics
 
 
-def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer_ls, exploration_factor, exploration_wd, phase2 =False):
+def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer_ls, exploration_factor, exploration_wd, phase1 =True, phase1_spreading = False):
     gfn_model.zero_grad()
 
     exploration_std = get_exploration_std(it, exploratory, exploration_factor, exploration_wd)
@@ -229,7 +233,7 @@ def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer
                     loss = bwd_train_step(energy, gfn_model, buffer, buffer_ls, exploration_std, it=it)
                 else:
                     loss, states, _, _, log_r  = fwd_train_step(energy, gfn_model, exploration_std, return_exp=True)
-                if phase2 == False:
+                if phase1 == True:
                     buffer.add(states[:, -1],log_r)
                     # reset loss to 0
                     loss = 0.0
@@ -243,6 +247,10 @@ def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer
         loss = bwd_train_step(energy, gfn_model, buffer, buffer_ls, exploration_std, it=it)
     else:
         loss = fwd_train_step(energy, gfn_model, exploration_std)
+    
+    if phase1_spreading:
+        loss = 0.0
+        return
     
     loss.backward()
     gfn_optimizer.step()
@@ -276,142 +284,157 @@ def bwd_train_step(energy, gfn_model, buffer, buffer_ls, exploration_std=None, i
                                  exploration_std=exploration_std)
     return loss
 
+def initialize_GFN(energy, args, device):
+    gfn_model = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
+                        trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
+                        langevin=args.langevin, learned_variance=args.learned_variance,
+                        partial_energy=args.partial_energy, log_var_range=args.log_var_range,
+                        pb_scale_range=args.pb_scale_range,
+                        t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
+                        conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
+                        pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
+                        joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
+    gfn_optimizer = get_gfn_optimizer(gfn_model, args.lr_policy, args.lr_flow, args.lr_back, args.learn_pb,
+                                    args.conditional_flow_model, args.use_weight_decay, args.weight_decay)
+    return gfn_model, gfn_optimizer
+
 
 def train():
-    name = get_name(args)
-    if not os.path.exists(name):
+    # For general training
+    trial = 0
+    name = f"unified_training/{trial}/"
+    while os.path.exists(name):
+        trial += 1
+        name = f"unified_training/{trial}/"
+    
+    if not os.path.exists('name'):
         os.makedirs(name)
-        os.makedirs(f"buffer{name}")
-
+        os.makedirs(name + 'buffer')
+    
     energy = get_energy(args.energy, device)
     eval_data = energy.sample(eval_data_size).to(device)
-
-    config = args.__dict__  
+    final_eval_data = energy.sample(final_eval_data_size).to(device)
+    
+    config = args.__dict__
     config["Experiment"] = "{args.energy}"
+    
     if args.wandb:
-        wandb.init(project="GFN Energy", config=config, name=name)
-
-    gfn_model = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
-                    trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
-                    langevin=args.langevin, learned_variance=args.learned_variance,
-                    partial_energy=args.partial_energy, log_var_range=args.log_var_range,
-                    pb_scale_range=args.pb_scale_range,
-                    t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
-                    conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
-                    pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
-                    joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
-
-
-    gfn_optimizer = get_gfn_optimizer(gfn_model, args.lr_policy, args.lr_flow, args.lr_back, args.learn_pb,
-                                      args.conditional_flow_model, args.use_weight_decay, args.weight_decay)
-
-    print(gfn_model)
-    
-    if args.load_model_path is not None:
-        gfn_model.load_state_dict(torch.load(args.load_model_path))
-        print("Model Loaded")  
-    
-    
+        wandb.init(project = "GFN_v2", config=config, name=name)
+        
     metrics = dict()
-    # Initialize buffer
-    buffer = ReplayBuffer(args.buffer_size, device, coreset_size = args.coreset_size, exploration_mode=True)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, coreset_size = args.coreset_size, exploration_mode=True)
-    
-    if args.load_buffer_path is not None:
-        buffer.load_buffer(args.load_buffer_path)
-        if args.local_search:
-            buffer_ls.load_buffer(args.load_buffer_path)
-        if args.pr_or_co == "coreset":
-            buffer.get_core_set()
-            if args.local_search:
-                buffer_ls.get_core_set()
-        else:
-            buffer.set_prioritization()
-            if args.local_search:
-                buffer_ls.set_prioritization()
-        print("Start From Phase 2")
+    buffer = ReplayBuffer(args.buffer_size, device, coreset_size=args.coreset_size, exploration_mode=True)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, coreset_size=args.coreset_size, exploration_mode=True)
     
     
+    # ----------------- Phase 1 ----------------- #
+    args.both_ways = True
+
+    if args.phase1_spreading:
+        args.exploration_wd = False
+    
+    # Initialize GFN
+    gfn_model, gfn_optimizer = initialize_GFN(energy, args, device)
     gfn_model.train()
-    for i in trange(args.epochs + 1):
-        phase2_true = i >= args.phase2 or args.load_buffer_path is not None
-        metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory,
-                                           buffer, buffer_ls, args.exploration_factor, args.exploration_wd, phase2_true)
-        
-        if args.load_buffer_path is None and args.both_ways:
-            if i % 1000 == 0 and i != 0:
-                buffer.save_buffer(f"buffer_np/buffer_{args.energy}_{i}_{time.time()}")
-                print("Buffer Saved at iteration", i)
-        
-            if i == args.phase2:
-                # Save Buffer
-                buffer.save_buffer(f"buffer_np/buffer_{args.energy}_{i}_{time.time()}")
-                if args.local_search:
-                    buffer_ls.save_buffer(f"buffer_np/buffer_ls_{args.energy}_{i}_{time.time()}")
+    print("Phase 1")
+    
+    os.makedirs(f"{name}buffer/{args.energy}", exist_ok=True)
+    
+    for i in trange(args.phase1):
+        metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory, buffer, buffer_ls,\
+                                             args.exploration_factor, args.exploration_wd, phase1=True, phase1_spreading = args.phase1_spreading)
+        if i == args.phase1 - 1:
+            buffer.save_buffer(f"{name}buffer/{args.energy}/buffer_{args.phase1}")
+            if args.local_search:
+                buffer_ls.save_buffer(f"{name}buffer/{args.energy}/buffer_ls_{args.phase1}")
                 
-                # Phase 2: Exploration mode off
-                # Reinitialize gfn_model, gfn_optimizer
-                #gfn_model = GFN(energy.data_ndim, args.s_emb_dim, args.hidden_dim, args.harmonics_dim, args.t_emb_dim,
-                #        trajectory_length=args.T, clipping=args.clipping, lgv_clip=args.lgv_clip, gfn_clip=args.gfn_clip,
-                #        langevin=args.langevin, learned_variance=args.learned_variance,
-                #        partial_energy=args.partial_energy, log_var_range=args.log_var_range,
-                #        pb_scale_range=args.pb_scale_range,
-                #        t_scale=args.t_scale, langevin_scaling_per_dimension=args.langevin_scaling_per_dimension,
-                #        conditional_flow_model=args.conditional_flow_model, learn_pb=args.learn_pb,
-                #        pis_architectures=args.pis_architectures, lgv_layers=args.lgv_layers,
-                #        joint_layers=args.joint_layers, zero_init=args.zero_init, device=device).to(device)
-                #
-                #gfn_optimizer = get_gfn_optimizer(gfn_model, args.lr_policy, args.lr_flow, args.lr_back, args.learn_pb,
-                #                            args.conditional_flow_model, args.use_weight_decay, args.weight_decay)
-                
-                if args.pr_or_co == "coreset":
-                    buffer.get_core_set()
-                    buffer_ls.get_core_set()
-                else:
-                    buffer.set_prioritization()
-                    buffer_ls.set_prioritization()
-                print("Phase 2 Start")
-        
-        if i % 100 == 0 and args.wandb:
+        if i % 100 == 0 or i == args.phase1 - 1 and args.wandb:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
             if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
                 del metrics['eval/log_Z_learned']
             images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
                             is_buffer="none")
             metrics.update(images)
-            if args.both_ways or args.bwd:
-                images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
-                metrics.update(images_buffer)
-                if phase2_true == False:
-                    images_filter = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="filter")
-                    metrics.update(images_filter)
-
-
+            images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
+            metrics.update(images_buffer)           
+            images_filter = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="filter")
+            metrics.update(images_filter)
+            
             plt.close('all')
             wandb.log(metrics, step=i)
-            if i % 1000 == 0:
-                torch.save(gfn_model.state_dict(), f'{name}model.pt')
+            
+    # ----------------- Phase 2 ----------------- #
+    # Reset GFN
+    args.only_bwd = True
+    args.mode_bwd = 'mle'
+    
+    if args.phase1_spreading:
+        args.exploration_wd = True
+    
+    gfn_model, gfn_optimizer = initialize_GFN(energy, args, device)
+    gfn_model.train()
+    print("Phase 2")
+    
+    buffer.load_buffer(f"{name}buffer/{args.energy}/buffer_{args.phase1}.npy")
+    if args.local_search:
+        buffer_ls.load_buffer(f"{name}buffer/{args.energy}/buffer_ls_{args.phase1}.npy")
+    buffer.get_core_set()
+    
+    
+    for i in trange(args.phase2):
+        metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory, buffer, buffer_ls,\
+                                                args.exploration_factor, args.exploration_wd, phase1=False, phase1_spreading=False)
+        if i == args.phase2 - 1:
+            # Save model
+            torch.save(gfn_model.state_dict(), f'{name}model_{args.energy}_{args.phase2}_phase2.pt')
+        
+        if i % 100 == 0 or i == args.phase2 - 1 and args.wandb:
+            metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
+            if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
+                del metrics['eval/log_Z_learned']
+            images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
+                            is_buffer="none")
+            metrics.update(images)
+            images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
+            metrics.update(images_buffer)           
 
-    eval_results = final_eval(energy, gfn_model)
+            
+            plt.close('all')
+            wandb.log(metrics, step=i + args.phase1)
+            
+    # ----------------- Phase 3 ----------------- #
+    args.only_bwd = False
+    args.only_fwd = True
+    # Reset GFN
+    gfn_model, gfn_optimizer = initialize_GFN(energy, args, device)
+    gfn_model.train()
+    print("Phase 3")
+    
+    gfn_model.load_state_dict(torch.load(f'{name}model_{args.energy}_{args.phase2}_phase2.pt'))
+    print("Model loaded")
+    
+    for i in trange(args.phase3):
+        metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory, buffer, buffer_ls,\
+                                                args.exploration_factor, args.exploration_wd, phase1=False, phase1_spreading=False)
+        if i % 100 == 0 or i == args.phase3 - 1 and args.wandb:
+            metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
+            if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
+                del metrics['eval/log_Z_learned']
+            images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
+                            is_buffer="none")
+            metrics.update(images)       
+
+            
+            plt.close('all')
+            wandb.log(metrics, step=i + args.phase1 + args.phase2)
+    
+    # Final evaluation
+    eval_results = eval_step(final_eval_data, energy, gfn_model, final_eval=True)
     if args.wandb:
-        metrics.update(eval_results)
+        wandb.log(eval_results)
         if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
-            del metrics['eval/log_Z_learned']
-    torch.save(gfn_model.state_dict(), f'{name}model_final.pt')
-
-
-def final_eval(energy, gfn_model):
-    final_eval_data = energy.sample(final_eval_data_size).to(device)
-    results = eval_step(final_eval_data, energy, gfn_model, final_eval=True)
-    return results
-
-
-def eval():
-    pass
-
-
+            del eval_results['final_eval/log_Z_learned']  
+    torch.save(gfn_model.state_dict(), f'{name}model_{args.energy}_{args.phase3}_phase3.pt')        
+       
+        
 if __name__ == '__main__':
-    if args.eval:
-        eval()
-    else:
-        train()
+    train()
