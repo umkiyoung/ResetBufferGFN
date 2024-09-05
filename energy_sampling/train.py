@@ -108,10 +108,10 @@ set_seed(args.seed)
 if 'SLURM_PROCID' in os.environ:
     args.seed += int(os.environ["SLURM_PROCID"])
 
-eval_data_size = 2000
-final_eval_data_size = 2000
-plot_data_size = 2000
-final_plot_data_size = 2000
+eval_data_size = 10000
+final_eval_data_size = 10000
+plot_data_size = 10000
+final_plot_data_size = 10000
 
 if args.pis_architectures:
     args.zero_init = True
@@ -193,13 +193,13 @@ def eval_step(eval_data, energy, gfn_model, final_eval=False):
     if final_eval:
         init_state = torch.zeros(final_eval_data_size, energy.data_ndim).to(device)
         samples, metrics['final_eval/log_Z'], metrics['final_eval/log_Z_lb'], metrics[
-            'final_eval/log_Z_learned'] = log_partition_function(
-            init_state, gfn_model, energy.log_reward)
+            'final_eval/log_Z_learned'], metrics['eval/eubo'] = log_partition_function(
+            init_state, gfn_model, energy.log_reward, target_energy=energy, gt_xs=eval_data)
     else:
         init_state = torch.zeros(eval_data_size, energy.data_ndim).to(device)
         samples, metrics['eval/log_Z'], metrics['eval/log_Z_lb'], metrics[
-            'eval/log_Z_learned'] = log_partition_function(
-            init_state, gfn_model, energy.log_reward)
+            'eval/log_Z_learned'], metrics['eval/eubo'] = log_partition_function(
+            init_state, gfn_model, energy.log_reward, target_energy=energy, gt_xs=eval_data)
     if eval_data is None:
         log_elbo = None
         sample_based_metrics = None

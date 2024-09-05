@@ -47,12 +47,17 @@ class ReplayBuffer():
     #----------------- For Sampling -----------------#
     def sample(self, batch_size):
         batch_size = min(batch_size, self.real_size)
-        if self.prioritization == True:
-            prioritization = self.softmax(self.true_rewards)
+        if self.prioritization == True and self.reward_prioritization == True:
+            self.sampler = WeightedRandomSampler(self.weights, batch_size, replacement=False)
+            indices = list(self.sampler)
+        elif self.prioritization == True and self.density_prioritization == True:
+            indices = self.sample_geometric_with_max(p=0.05, max_value = None)
+            
+            
         else:
             prioritization = np.ones_like(self.true_rewards)
             prioritization /= prioritization.sum()
-        indices = np.random.choice(self.real_size, batch_size, p=prioritization, replace=False)
+            indices = np.random.choice(self.real_size, batch_size, p=prioritization, replace=False)
 
         # Get samples
         samples = np.array(self.buffer)[indices]
@@ -85,7 +90,7 @@ class ReplayBuffer():
     def get_core_set(self):
         self.exploration_mode = False
         #high_reward_indices = np.argsort(self.true_rewards)[-self.coreset_size:]
-        self.mean_field_histogram(100)
+        self.density_estimation()
         low_density_indices = np.argsort(self.density_sum)[:self.coreset_size]
         self.buffer = list(np.array(self.buffer)[low_density_indices])
         self.true_rewards = list(np.array(self.true_rewards)[low_density_indices])
@@ -93,33 +98,38 @@ class ReplayBuffer():
         self.real_size = len(self.buffer)
     
     #----------------- For Prioritization -----------------#
-    def set_prioritization(self):
+    def set_prioritization(self, method):
+        samples, _ = self.sample(6000)
         self.exploration_mode = False
-        self.prioritization = True    
+        self.prioritization = True      
+        if method =='reward':
+            self.reward_prioritization = True
+            ranks = np.argsort(np.argsort(-1 * self.true_rewards))
+            self.weights = 1.0 / (1e-2 * len(self.true_rewards) + ranks)
+
+        elif method == 'density':
+            self.density_prioritization = True
+            self.weights = self.density_estimation(samples)
+            
     
-    #----------------- For Histogram -----------------#
-    def mean_field_histogram(self, num_bins=100):
-        for i in range(np.array(self.buffer).shape[1]):
-            dimension_data = self.buffer[:, i]
-            hist, bin_edges = np.histogram(dimension_data, bins=num_bins, density=True)
-            bin_indices = np.digitize(dimension_data, bin_edges[:-1], right=True)
-            rewards_for_dimension = hist[bin_indices -1]
-            if i == 0:
-                density_sum = rewards_for_dimension
-            else:
-                density_sum += rewards_for_dimension
-        
-        self.density_sum = density_sum            
-    
-    
+    #----------------- For Density Estimation -----------------#
+    def density_estimation(self, samples):
+        k = 1000
+        cdist = torch.cdist(torch.tensor(self.buffer).to("cpu"), samples.to("cpu"))
+        dist_to_kst = cdist.topk(k, largest=False)[0][:, -1]
+        return -dist_to_kst
+
+    def sample_geometric_with_max(self, p, max_value, size):
+        if p > 0:
+            for _ in range(10_000):
+                sample = np.random.geometric(p)
+                if np.all(sample <= max_value):
+                    return sample
+        return np.random.randint(0, max_value + 1, size)
     #----------------- Utils -----------------#
         
     def __len__(self):
         return self.real_size
-    
-    def softmax(self, x):
-        e_x = np.exp(x - np.max(x))
-        return e_x / e_x.sum()
     
     #----------------- For Loading -----------------#
     def save_buffer(self, path):

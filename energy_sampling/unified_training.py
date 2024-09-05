@@ -47,6 +47,7 @@ parser.add_argument('--only_bwd', action='store_true', default=False)
 parser.add_argument('--phase1', type=int, default=15000)
 parser.add_argument('--phase2', type=int, default=25000)
 parser.add_argument('--phase3', type=int, default=25000)
+parser.add_argument('--phase2reset', action='store_true', default=False)
 parser.add_argument('--phase1_spreading', action='store_true', default=False)
 
 # For local search
@@ -114,8 +115,8 @@ if 'SLURM_PROCID' in os.environ:
 
 eval_data_size = 2000
 final_eval_data_size = 2000
-plot_data_size = 2000
-final_plot_data_size = 2000
+plot_data_size = 10000
+final_plot_data_size = 10000
 
 if args.pis_architectures:
     args.zero_init = True
@@ -329,8 +330,8 @@ def train():
     # ----------------- Phase 1 ----------------- #
     args.both_ways = True
 
-    if args.phase1_spreading:
-        args.exploration_wd = False
+    #if args.phase1_spreading:
+    #    args.exploration_wd = False
     
     # Initialize GFN
     gfn_model, gfn_optimizer = initialize_GFN(energy, args, device)
@@ -347,16 +348,16 @@ def train():
             if args.local_search:
                 buffer_ls.save_buffer(f"{name}buffer/{args.energy}/buffer_ls_{args.phase1}")
                 
-        if i % 100 == 0 or i == args.phase1 - 1 and args.wandb:
+        if i % 1000 == 0 or i == args.phase1 - 1 and args.wandb:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
             if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
                 del metrics['eval/log_Z_learned']
             images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
                             is_buffer="none")
             metrics.update(images)
-            images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
+            images_buffer = plot_step(energy, gfn_model, name, buffer, plot_data_size, is_buffer="buffer")
             metrics.update(images_buffer)           
-            images_filter = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="filter")
+            images_filter = plot_step(energy, gfn_model, name, buffer, plot_data_size, is_buffer="filter")
             metrics.update(images_filter)
             
             plt.close('all')
@@ -367,11 +368,12 @@ def train():
     args.only_bwd = True
     args.mode_bwd = 'mle'
     
-    if args.phase1_spreading:
-        args.exploration_wd = True
+    #if args.phase1_spreading:
+    #    args.exploration_wd = True
     
-    gfn_model, gfn_optimizer = initialize_GFN(energy, args, device)
-    gfn_model.train()
+    if args.phase2reset:
+        gfn_model, gfn_optimizer = initialize_GFN(energy, args, device)
+        gfn_model.train()
     print("Phase 2")
     
     buffer.load_buffer(f"{name}buffer/{args.energy}/buffer_{args.phase1}.npy")
@@ -387,14 +389,14 @@ def train():
             # Save model
             torch.save(gfn_model.state_dict(), f'{name}model_{args.energy}_{args.phase2}_phase2.pt')
         
-        if i % 100 == 0 or i == args.phase2 - 1 and args.wandb:
+        if i % 1000 == 0 or i == args.phase2 - 1 and args.wandb:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
             if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
                 del metrics['eval/log_Z_learned']
             images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
                             is_buffer="none")
             metrics.update(images)
-            images_buffer = plot_step(energy, gfn_model, name, buffer, args.batch_size, is_buffer="buffer")
+            images_buffer = plot_step(energy, gfn_model, name, buffer, plot_data_size, is_buffer="buffer")
             metrics.update(images_buffer)           
 
             
@@ -415,7 +417,7 @@ def train():
     for i in trange(args.phase3):
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory, buffer, buffer_ls,\
                                                 args.exploration_factor, args.exploration_wd, phase1=False, phase1_spreading=False)
-        if i % 100 == 0 or i == args.phase3 - 1 and args.wandb:
+        if i % 1000 == 0 or i == args.phase3 - 1 and args.wandb:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
             if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
                 del metrics['eval/log_Z_learned']
