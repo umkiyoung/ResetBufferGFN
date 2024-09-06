@@ -7,39 +7,44 @@ class ReplayBuffer():
     def __init__(self,
                  buffer_size,
                  device,
-                 coreset_size = 30000,
                  exploration_mode = True,
+                 negligible_reward = -100,
                  ) -> None:
         self.buffer_size = buffer_size
         self.device = device
-        self.coreset_size = coreset_size
         self.real_size = 0
         self.iter = 0
         self.exploration_mode = exploration_mode
         self.prioritization = False
-        self.min_cut_value = -100
+        self.min_cut_value = negligible_reward
+        
+        self.min_value_truncate = True
+        
+        self.higher_reward = 100
+        self.lower_reward = -100
+        
+        self.min_reward = negligible_reward
         
         # Initialize the buffer
         self.buffer = []
         self.true_rewards = []
-        self.max_true_reward = -100
         
+                
     #----------------- For Adding -----------------#
     def add(self, transition, rewards):
         self.iter += 1
-        # -100보다 큰 reward만 저장
-        indices = torch.where(rewards > self.min_cut_value)[0]
-        transition, rewards = transition[indices], rewards[indices]
-        num_input_transitions = len(rewards)
-        if len(rewards) == 0:
-            return
-        if self.real_size + num_input_transitions > self.buffer_size:
-            self.truncate(num_input_transitions)
+        if self.min_value_truncate:
+            if self.iter != 1:
+                self.min_reward = min(self.true_rewards)
+            allowing_indices = torch.where(rewards > self.min_reward)[0]
+            transition, rewards = transition[allowing_indices], rewards[allowing_indices]
+        len_adding = len(rewards)
+        if self.real_size + len_adding > self.buffer_size:
+            self.truncate(len_adding)
 
-        self.max_true_reward = max(self.max_true_reward, rewards.max().item())
         transition, rewards = transition.cpu().numpy(), rewards.cpu().numpy()
 
-        for i in range(num_input_transitions):
+        for i in range(len_adding):
             self.buffer.append(transition[i])
             self.true_rewards.append(rewards[i])
             self.real_size += 1
@@ -47,13 +52,9 @@ class ReplayBuffer():
     #----------------- For Sampling -----------------#
     def sample(self, batch_size):
         batch_size = min(batch_size, self.real_size)
-        if self.prioritization == True and self.reward_prioritization == True:
+        if self.prioritization == True:
             self.sampler = WeightedRandomSampler(self.weights, batch_size, replacement=False)
             indices = list(self.sampler)
-        elif self.prioritization == True and self.density_prioritization == True:
-            indices = self.sample_geometric_with_max(p=0.05, max_value = None)
-            
-            
         else:
             prioritization = np.ones_like(self.true_rewards)
             prioritization /= prioritization.sum()
@@ -62,19 +63,27 @@ class ReplayBuffer():
         # Get samples
         samples = np.array(self.buffer)[indices]
         rewards = np.array(self.true_rewards)[indices]
+        
         if self.exploration_mode == True:
-            rewards = np.full_like(rewards, self.max_true_reward)
+            low_reward_indices = np.where(rewards < self.min_cut_value)[0]
+            high_reward_indices = np.where(rewards >= self.min_cut_value)[0]
+            rewards[low_reward_indices] = self.lower_reward
+            rewards[high_reward_indices] = self.higher_reward
+            
         samples, rewards = torch.tensor(samples).float().to(self.device), torch.tensor(rewards).float().to(self.device)
         
+        print("Minimum Reward in buffer: ", self.min_reward)
         return samples, rewards
     #----------------- For Dropping -----------------#
     
     def truncate(self, num_samples, return_samples=False):
         num_samples = min(num_samples, self.real_size)
-        dropping_indices = self.get_low_reward_indices(num_samples)
-        if return_samples == False:
-            self.min_cut_value = max(self.min_cut_value, max(np.array(self.true_rewards)[dropping_indices]))
-        print(self.min_cut_value)
+        print("buffer full")
+        
+        if self.min_value_truncate:
+            dropping_indices = self.get_low_reward_indices(num_samples)
+        else:
+            dropping_indices = np.random.choice(self.real_size, num_samples, replace=False)
         if return_samples:
             return torch.tensor(np.array(self.buffer)[dropping_indices]).float().to(self.device)
         # Drop the lowest intrinsic reward samples
@@ -86,46 +95,13 @@ class ReplayBuffer():
     def get_low_reward_indices(self, num_samples):
         return np.argsort(self.true_rewards)[:num_samples] 
     
-    #----------------- For Core Set -----------------#
-    def get_core_set(self):
-        self.exploration_mode = False
-        #high_reward_indices = np.argsort(self.true_rewards)[-self.coreset_size:]
-        self.density_estimation()
-        low_density_indices = np.argsort(self.density_sum)[:self.coreset_size]
-        self.buffer = list(np.array(self.buffer)[low_density_indices])
-        self.true_rewards = list(np.array(self.true_rewards)[low_density_indices])
-
-        self.real_size = len(self.buffer)
-    
     #----------------- For Prioritization -----------------#
-    def set_prioritization(self, method):
-        samples, _ = self.sample(6000)
+    def set_prioritization(self):
         self.exploration_mode = False
         self.prioritization = True      
-        if method =='reward':
-            self.reward_prioritization = True
-            ranks = np.argsort(np.argsort(-1 * self.true_rewards))
-            self.weights = 1.0 / (1e-2 * len(self.true_rewards) + ranks)
-
-        elif method == 'density':
-            self.density_prioritization = True
-            self.weights = self.density_estimation(samples)
+        ranks = np.argsort(np.argsort(-1 * np.array(self.true_rewards)))
+        self.weights = 1.0 / (1e-2 * len(np.array(self.true_rewards)) + ranks)
             
-    
-    #----------------- For Density Estimation -----------------#
-    def density_estimation(self, samples):
-        k = 1000
-        cdist = torch.cdist(torch.tensor(self.buffer).to("cpu"), samples.to("cpu"))
-        dist_to_kst = cdist.topk(k, largest=False)[0][:, -1]
-        return -dist_to_kst
-
-    def sample_geometric_with_max(self, p, max_value, size):
-        if p > 0:
-            for _ in range(10_000):
-                sample = np.random.geometric(p)
-                if np.all(sample <= max_value):
-                    return sample
-        return np.random.randint(0, max_value + 1, size)
     #----------------- Utils -----------------#
         
     def __len__(self):
@@ -136,6 +112,7 @@ class ReplayBuffer():
         np.save(path, np.array(self.buffer), allow_pickle=True)
         np.save(path+'_rewards', np.array(self.true_rewards), allow_pickle=True)
         
+    #----------------- For Saving -----------------#    
     def load_buffer(self, path):
         self.buffer = np.load(path, allow_pickle=True)
         self.true_rewards = np.load(path.replace(".npy", "_rewards.npy"), allow_pickle=True)

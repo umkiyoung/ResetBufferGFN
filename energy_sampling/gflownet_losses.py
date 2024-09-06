@@ -2,12 +2,21 @@ import torch
 from torch.distributions import Normal
 
 
-def fwd_tb(initial_state, gfn, log_reward_fn, exploration_std=None, return_exp = False):
+def fwd_tb(initial_state, gfn, log_reward_fn, exploration_std=None, return_exp = False, negligible_reward = None):
     states, log_pfs, log_pbs, log_fs = gfn.get_trajectory_fwd(initial_state, exploration_std, log_reward_fn)
     with torch.no_grad():
         log_r = log_reward_fn(states[:, -1]).detach()
 
-    loss = 0.5 * ((log_pfs.sum(-1) + log_fs[:, 0] - log_pbs.sum(-1) - log_r) ** 2)
+    if negligible_reward is None:
+        loss = 0.5 * ((log_pfs.sum(-1) + log_fs[:, 0] - log_pbs.sum(-1) - log_r) ** 2)
+    else:
+        low_reward_indices = torch.where(log_r < negligible_reward)[0]
+        high_reward_indices = torch.where(log_r >= negligible_reward)[0]
+        fake_log_r = log_r.clone()
+        fake_log_r[low_reward_indices] = -100
+        fake_log_r[high_reward_indices] = 100
+        loss = 0.5 * ((log_pfs.sum(-1) + log_fs[:, 0] - log_pbs.sum(-1) - fake_log_r) ** 2)
+        
     if return_exp:
         return loss.mean(), states, log_pfs, log_pbs, log_r
     else:

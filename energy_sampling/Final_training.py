@@ -21,13 +21,13 @@ import wandb
 
 parser = argparse.ArgumentParser(description='GFN Linear Regression')
 parser.add_argument('--lr_policy', type=float, default=1e-3)
-parser.add_argument('--lr_flow', type=float, default=1e-2)
+parser.add_argument('--lr_flow', type=float, default=1e-1)
 parser.add_argument('--lr_back', type=float, default=1e-3)
 parser.add_argument('--hidden_dim', type=int, default=64)
 parser.add_argument('--s_emb_dim', type=int, default=64)
 parser.add_argument('--t_emb_dim', type=int, default=64)
 parser.add_argument('--harmonics_dim', type=int, default=64)
-parser.add_argument('--batch_size', type=int, default=300)
+parser.add_argument('--batch_size', type=int, default=2000)
 parser.add_argument('--buffer_size', type=int, default=600000)
 parser.add_argument('--T', type=int, default=100)
 parser.add_argument('--subtb_lambda', type=int, default=2)
@@ -41,13 +41,8 @@ parser.add_argument('--both_ways', action='store_true', default=False)
 
 
 # For Phase model
-parser.add_argument('--only_fwd', action='store_true', default=False)
-parser.add_argument('--only_bwd', action='store_true', default=False)
-parser.add_argument('--phase1', type=int, default=15000)
+parser.add_argument('--phase1', type=int, default=5000)
 parser.add_argument('--phase2', type=int, default=25000)
-parser.add_argument('--phase3', type=int, default=25000)
-parser.add_argument('--phase2reset', action='store_true', default=False)
-parser.add_argument('--phase1_spreading', action='store_true', default=False)
 
 # For local search
 ################################################################
@@ -73,9 +68,7 @@ parser.add_argument('--target_acceptance_rate', type=float, default=0.574)
 
 # For replay buffer
 ################################################################
-parser.add_argument('--coreset_size', type=int, default=30000)
 parser.add_argument('--load_buffer_path', type=str, default=None)
-parser.add_argument('--pr_or_co', type=str, default="prioritize", choices=('prioritize', 'coreset'))
 ################################################################
 
 parser.add_argument('--bwd', action='store_true', default=False)
@@ -112,9 +105,9 @@ set_seed(args.seed)
 if 'SLURM_PROCID' in os.environ:
     args.seed += int(os.environ["SLURM_PROCID"])
 
-eval_data_size = 10000
+eval_data_size = 1000
 final_eval_data_size = 10000
-plot_data_size = 10000
+plot_data_size = 1000
 final_plot_data_size = 10000
 
 if args.pis_architectures:
@@ -221,20 +214,19 @@ def eval_step(eval_data, energy, gfn_model, final_eval=False):
     return metrics
 
 
-def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer_ls, exploration_factor, exploration_wd, phase1 =True):
+def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer_ls, exploration_factor, exploration_wd, phase1 =True, negligible_reward=None):
     gfn_model.zero_grad()
 
     exploration_std = get_exploration_std(it, exploratory, exploration_factor, exploration_wd)
 
     if args.both_ways:
-        if it % 2 == 0 or args.only_fwd:
+        if it % 2 == 0:
             if args.sampling == 'buffer':
-                loss, states, _, _, log_r  = fwd_train_step(energy, gfn_model, exploration_std, return_exp=True)
                 if phase1 == True:
+                    loss, states, _, _, log_r  = fwd_train_step(energy, gfn_model, exploration_std, return_exp=True, negligible_reward=negligible_reward)
                     buffer.add(states[:, -1],log_r)
-                    # reset loss to 0
-                    loss = 0.0
-                    return
+                else:
+                    loss, states, _, _, log_r  = fwd_train_step(energy, gfn_model, exploration_std, return_exp=True, negligible_reward=None)
             else:
                 loss = fwd_train_step(energy, gfn_model, exploration_std)
         else:
@@ -250,10 +242,10 @@ def train_step(energy, gfn_model, gfn_optimizer, it, exploratory, buffer, buffer
     return loss.item()
 
 
-def fwd_train_step(energy, gfn_model, exploration_std, return_exp=False):
+def fwd_train_step(energy, gfn_model, exploration_std, return_exp=False, negligible_reward=None):
     init_state = torch.zeros(args.batch_size, energy.data_ndim).to(device)
     loss = get_gfn_forward_loss(args.mode_fwd, init_state, gfn_model, energy.log_reward, coeff_matrix,
-                                exploration_std=exploration_std, return_exp=return_exp)
+                                exploration_std=exploration_std, return_exp=return_exp, negligible_reward=negligible_reward)
     return loss
 
 
@@ -295,10 +287,10 @@ def initialize_GFN(energy, args, device):
 def train():
     # For general training
     trial = 0
-    name = f"final_training/{trial}/"
+    name = f"final_training_funnel/{trial}/"
     while os.path.exists(name):
         trial += 1
-        name = f"final_training/{trial}/"
+        name = f"final_training_funnel/{trial}/"
     
     if not os.path.exists('name'):
         os.makedirs(name)
@@ -315,12 +307,13 @@ def train():
         wandb.init(project = "GFN_v2", config=config, name=name)
         
     metrics = dict()
-    buffer = ReplayBuffer(args.buffer_size, device, coreset_size=args.coreset_size, exploration_mode=True)
-    buffer_ls = ReplayBuffer(args.buffer_size, device, coreset_size=args.coreset_size, exploration_mode=True)
+    negligible_reward = -100
+    buffer = ReplayBuffer(args.buffer_size, device, exploration_mode=True, negligible_reward=negligible_reward)
+    buffer_ls = ReplayBuffer(args.buffer_size, device, exploration_mode=True, negligible_reward=negligible_reward)
     
-    
-    # ----------------- Phase 1 ----------------- #
     args.both_ways = True
+
+    # ----------------- Phase 1 ----------------- #
         # Initialize GFN
     gfn_model, gfn_optimizer = initialize_GFN(energy, args, device)
     gfn_model.train()
@@ -330,16 +323,12 @@ def train():
     
     for i in trange(args.phase1):
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory, buffer, buffer_ls,\
-                                             args.exploration_factor, args.exploration_wd, phase1=True)
-        if i == args.phase1 - 1:
-            buffer.save_buffer(f"{name}buffer/{args.energy}/buffer_{args.phase1}")
-            if args.local_search:
-                buffer_ls.save_buffer(f"{name}buffer/{args.energy}/buffer_ls_{args.phase1}")
+                                             args.exploration_factor, args.exploration_wd, phase1=True, negligible_reward=negligible_reward)
+        if i % 1000 == 0 or i == args.phase1 - 1:
+            buffer.save_buffer(f"{name}buffer/{args.energy}/buffer_{i}_{args.phase1}")
                 
         if i % 1000 == 0 or i == args.phase1 - 1 and args.wandb:
             metrics.update(eval_step(eval_data, energy, gfn_model, final_eval=False))
-            if 'tb-avg' in args.mode_fwd or 'tb-avg' in args.mode_bwd:
-                del metrics['eval/log_Z_learned']
             images = plot_step(energy=energy, gfn_model=gfn_model, name=name, buffer=None, plot_size=plot_data_size,
                             is_buffer="none")
             metrics.update(images)
@@ -361,11 +350,15 @@ def train():
     gfn_model.train()
     print("Phase 2")
     
-    buffer.load_buffer(f"/home/uky/repos_python/Research/gfn-diffusion/unified_training/39/buffer/many_well/buffer_15000.npy")
-    buffer.set_prioritization("reward")
+    #buffer.load_buffer("/home/uky/repos_python/Research/gfn-diffusion/final_training/23/buffer/many_well/buffer_9999_10000.npy")
+    
+    buffer.set_prioritization()
     
     
     for i in trange(args.phase2):
+        #For final forward
+        if args.phase2 - i < 1000:
+            args.both_ways = False
         metrics['train/loss'] = train_step(energy, gfn_model, gfn_optimizer, i, args.exploratory, buffer, buffer_ls,\
                                                 args.exploration_factor, args.exploration_wd, phase1=False)
         if i == args.phase2 - 1:
